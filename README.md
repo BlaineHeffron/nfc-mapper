@@ -21,13 +21,19 @@ It can:
 - build raw NDEF text and URL payloads
 - generate Flipper-compatible `.nfc` files for `NTAG213`, `NTAG215`, and `NTAG216`
 - build a full campaign bundle from JSON:
+  - import tag definitions from CSV
   - `flipper_sd/ext/nfc/<campaign>/...` for the Flipper SD card
   - `site/` static microsite assets
-  - `manifest.json` mapping stickers to generated URLs and files
+  - `qr/` SVG QR codes for each tag
+  - `redirects/` short-code maps when redirect mode is enabled
+  - `print/` printable deployment sheets
+  - `integrations/` webhook and redirect handler templates
+  - `manifest.json` and `manifest.csv` mapping stickers to generated URLs and files
 
 ## Requirements
 
 - Python 3.10+
+- `pip install -r requirements.txt`
 - A Flipper Zero with NFC support
 - Blank compatible tags
   - `NTAG215` is the safest default for marketing links
@@ -36,9 +42,11 @@ It can:
 ## Quick Start
 
 1. Edit [campaigns/example_marketing_campaign.json](/home/blaine/projects/fzero/campaigns/example_marketing_campaign.json).
-2. Set `campaign.base_url` to the real hosted landing-page URL.
-3. Update the campaign copy and define one entry in `tags[]` for each sticker.
-4. Build the bundle:
+2. Edit [campaigns/example_tags.csv](/home/blaine/projects/fzero/campaigns/example_tags.csv) if you want to batch-manage tag rows in CSV.
+3. Set `campaign.base_url` to the real hosted landing-page URL.
+4. If you want shorter NFC URLs, set `campaign.redirect.base_url` to the short redirect domain you will host.
+5. Update the campaign copy and integration settings.
+6. Build the bundle:
 
 ```bash
 python3 tools/nfc_tag_tool.py build-campaign campaigns/example_marketing_campaign.json --out dist
@@ -51,6 +59,10 @@ This creates:
 - `dist/<campaign>/site/styles.css`
 - `dist/<campaign>/site/app.js`
 - `dist/<campaign>/site/campaign-data.json`
+- `dist/<campaign>/qr/*.svg`
+- `dist/<campaign>/print/deployment-sheet.html`
+- `dist/<campaign>/integrations/*.js`
+- `dist/<campaign>/manifest.csv`
 - `dist/<campaign>/manifest.json`
 
 ## Campaign Config
@@ -65,7 +77,10 @@ Important fields:
 - `campaign.default_tag_type`: use `NTAG215` unless you know your payload fits on `NTAG213`
 - `campaign.default_source` and `campaign.default_medium`: defaults for generated UTM params
 - `campaign.site.lead_endpoint`: optional JSON webhook endpoint for real lead capture
-- `tags[]`: one entry per sticker
+- `campaign.site.integration`: optional direct HubSpot form config or named endpoint settings
+- `campaign.redirect`: optional redirect-code mode for shorter NFC URLs
+- `tags[]`: inline tag definitions if you want JSON-only config
+- `csv_import`: optional CSV-based tag import block
 
 Useful per-tag fields:
 
@@ -76,8 +91,54 @@ Useful per-tag fields:
 - `interactive`
 - `site_copy`
 - `tag_type`
+- `redirect_code`
 
 The builder appends UTM and routing params to each URL so the landing page can tell which sticker was tapped.
+
+### CSV Import
+
+The sample CSV file is [campaigns/example_tags.csv](/home/blaine/projects/fzero/campaigns/example_tags.csv).
+
+Supported columns include:
+
+- `name`
+- `slug`
+- `content`
+- `extras`
+- `interactive_type`
+- `interactive_headline`
+- `interactive_prompt`
+- `interactive_outcomes`
+- `interactive_options`
+- `site_headline`
+- `site_subheadline`
+- `tag_type`
+- `redirect_code`
+
+`extras` uses comma-separated `key=value` pairs. Interactive outcomes/options use `|` separators.
+
+### Redirect Mode
+
+When `campaign.redirect.enabled` is true, the NFC tag is programmed with the short redirect URL instead of the long landing-page URL. The builder still stores the full landing destination in the manifest and emits:
+
+- `redirects/redirect-map.json`
+- `integrations/redirect-handler.js`
+
+That lets you keep the NFC payload short while preserving campaign attribution.
+
+### Lead Integrations
+
+The generated site supports three lead paths:
+
+- local demo storage via `localStorage`
+- direct HubSpot form submission when `campaign.site.integration.provider` is `hubspot`
+- custom/serverless endpoint submission for Airtable or any other backend
+
+The bundle also includes templates in `integrations/`:
+
+- `hubspot-proxy.js`
+- `airtable-proxy.js`
+- `redirect-handler.js` when redirect mode is enabled
 
 ## Put It On The Flipper
 
@@ -118,6 +179,9 @@ Before building for production:
 
 - point `campaign.base_url` at the hosted microsite URL
 - set `campaign.site.lead_endpoint` if you want submissions sent to a real webhook
+- or configure `campaign.site.integration` for direct HubSpot submission / an Airtable proxy endpoint
+
+If you use redirect mode, host the redirect handler too and point `campaign.redirect.base_url` at that public route.
 
 If `lead_endpoint` is empty, the page stores leads in browser `localStorage` for demo/testing only.
 
@@ -144,6 +208,12 @@ Export a single Flipper-compatible NFC file:
 python3 tools/nfc_tag_tool.py export-flipper-url "https://example.com/demo" dist/demo.nfc --tag-type NTAG215 --uid-seed booth-a
 ```
 
+Build the sample campaign bundle with CSV import, QR assets, redirects, and print sheet:
+
+```bash
+python3 tools/nfc_tag_tool.py build-campaign campaigns/example_marketing_campaign.json --out dist
+```
+
 Run tests:
 
 ```bash
@@ -155,6 +225,7 @@ python3 -m unittest discover -s tests
 - `NTAG215` is the practical default for longer marketing URLs.
 - If a build fails because the payload is too large, shorten the URL, use a redirect domain, reduce query params, or move to a larger tag type.
 - The generated sample campaign intentionally uses `example.com` placeholders and no real webhook.
+- QR assets are emitted as SVG so they stay sharp in print sheets and on the web.
 
 ## Public Repo Safety
 

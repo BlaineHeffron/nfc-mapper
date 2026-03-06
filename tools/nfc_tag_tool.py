@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import re
 import shutil
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +18,9 @@ from urllib.parse import parse_qsl
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
+
+import qrcode
+from qrcode.image.svg import SvgPathImage
 
 
 NFC_CURRENT_FORMAT_VERSION = 4
@@ -315,6 +321,132 @@ def normalize_extra_pairs(extras: dict[str, str] | list[str] | None) -> dict[str
     return query
 
 
+def parse_key_value_csv(value: str) -> dict[str, str]:
+    pairs: dict[str, str] = {}
+    if not value:
+        return pairs
+    for item in value.split(","):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        if "=" not in candidate:
+            raise ValueError(f"invalid key=value pair: {candidate!r}")
+        key, pair_value = candidate.split("=", 1)
+        pairs[key.strip()] = pair_value.strip()
+    return pairs
+
+
+def parse_pipe_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split("|") if item.strip()]
+
+
+def resolve_path(path: str, relative_to: Path) -> Path:
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        resolved = relative_to / resolved
+    return resolved.resolve()
+
+
+def deterministic_code(seed: str, length: int = 7, alphabet: str = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789") -> str:
+    digest = hashlib.sha1(seed.encode("utf-8")).digest()
+    number = int.from_bytes(digest, "big")
+    chars = []
+    base = len(alphabet)
+    while len(chars) < length:
+        number, remainder = divmod(number, base)
+        chars.append(alphabet[remainder])
+    return "".join(chars)
+
+
+def build_redirect_url(base_url: str, code: str, mode: str = "path", query_param: str = "c") -> str:
+    if mode == "query":
+        parts = urlsplit(base_url)
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        query[query_param] = code
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment)
+        )
+    return base_url.rstrip("/") + "/" + code
+
+
+def load_csv_tags(csv_path: Path, defaults: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    tags = []
+    defaults = defaults or {}
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if not any((value or "").strip() for value in row.values()):
+                continue
+
+            tag = deepcopy(defaults)
+            tag["name"] = row.get("name") or tag.get("name")
+            if not tag.get("name"):
+                raise ValueError(f"CSV row in {csv_path} is missing a name")
+
+            for field in [
+                "slug",
+                "content",
+                "tag_type",
+                "kind",
+                "text",
+                "lang",
+                "source",
+                "medium",
+                "campaign",
+                "base_url",
+                "term",
+                "ref",
+                "redirect_code",
+            ]:
+                if row.get(field):
+                    tag[field] = row[field].strip()
+
+            extras = normalize_extra_pairs(tag.get("extras", {}))
+            extras.update(parse_key_value_csv(row.get("extras", "")))
+            if extras:
+                tag["extras"] = extras
+
+            interactive = deepcopy(tag.get("interactive", {}))
+            if row.get("interactive_type"):
+                interactive["type"] = row["interactive_type"].strip()
+            if row.get("interactive_headline"):
+                interactive["headline"] = row["interactive_headline"].strip()
+            if row.get("interactive_prompt"):
+                interactive["prompt"] = row["interactive_prompt"].strip()
+            if row.get("interactive_options"):
+                interactive["options"] = parse_pipe_list(row["interactive_options"])
+            if row.get("interactive_outcomes"):
+                interactive["outcomes"] = parse_pipe_list(row["interactive_outcomes"])
+            if interactive:
+                tag["interactive"] = interactive
+
+            site_copy = deepcopy(tag.get("site_copy", {}))
+            if row.get("site_headline"):
+                site_copy["headline"] = row["site_headline"].strip()
+            if row.get("site_subheadline"):
+                site_copy["subheadline"] = row["site_subheadline"].strip()
+            if site_copy:
+                tag["site_copy"] = site_copy
+
+            tags.append(tag)
+
+    return tags
+
+
+def load_campaign_config(config_path: Path) -> dict[str, Any]:
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    tags = list(config.get("tags", []))
+    csv_imports = config.get("csv_import")
+    if csv_imports:
+        if isinstance(csv_imports, dict):
+            csv_imports = [csv_imports]
+        for import_spec in csv_imports:
+            csv_path = resolve_path(import_spec["path"], config_path.parent)
+            tags.extend(load_csv_tags(csv_path, import_spec.get("defaults")))
+    config["tags"] = tags
+    return config
+
+
 def build_marketing_url(
     base_url: str,
     campaign: str | None,
@@ -497,14 +629,254 @@ def write_text_file(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def write_json_file(path: Path, payload: Any) -> None:
+    write_text_file(path, json.dumps(payload, indent=2))
+
+
+def write_csv_manifest(path: Path, tags: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "name",
+        "slug",
+        "kind",
+        "tag_type",
+        "content",
+        "final_url",
+        "redirect_target_url",
+        "redirect_code",
+        "relative_flipper_file",
+        "relative_qr_file",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for tag in tags:
+            writer.writerow({field: tag.get(field, "") for field in fieldnames})
+
+
+def generate_qr_svg(data: str) -> str:
+    image = qrcode.make(data, image_factory=SvgPathImage, box_size=10, border=2)
+    buffer = io.BytesIO()
+    image.save(buffer)
+    return buffer.getvalue().decode("utf-8")
+
+
+def generate_qr_assets(qr_dir: Path, tags: list[dict[str, Any]], bundle_dir: Path) -> None:
+    qr_dir.mkdir(parents=True, exist_ok=True)
+    for tag in tags:
+        svg_path = qr_dir / f"{tag['slug']}.svg"
+        write_text_file(svg_path, generate_qr_svg(tag["final_url"]))
+        tag["relative_qr_file"] = str(svg_path.relative_to(bundle_dir))
+
+
+def print_sheet_html(campaign_name: str, tags: list[dict[str, Any]]) -> str:
+    cards = []
+    for tag in tags:
+        qr_path = "../" + tag["relative_qr_file"].replace("\\", "/")
+        destination = tag.get("redirect_target_url") or tag["final_url"]
+        cards.append(
+            f"""
+      <article class="card">
+        <div class="topline">{campaign_name}</div>
+        <h2>{tag['name']}</h2>
+        <p class="slug">{tag['slug']}</p>
+        <img src="{qr_path}" alt="QR code for {tag['name']}">
+        <dl>
+          <div><dt>Tag URL</dt><dd>{tag['final_url']}</dd></div>
+          <div><dt>Landing URL</dt><dd>{destination}</dd></div>
+          <div><dt>Flipper File</dt><dd>{tag['relative_flipper_file']}</dd></div>
+        </dl>
+      </article>"""
+        )
+
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>{campaign_name} Deployment Sheet</title>
+    <style>
+      @page {{ size: letter portrait; margin: 0.5in; }}
+      body {{ font-family: "Space Grotesk", sans-serif; margin: 0; color: #1a2522; }}
+      .sheet {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }}
+      .card {{ border: 1px solid #d9d4c6; border-radius: 18px; padding: 18px; break-inside: avoid; }}
+      .topline {{ text-transform: uppercase; font-size: 10px; letter-spacing: 0.14em; color: #6d7066; }}
+      h2 {{ margin: 8px 0 2px; font-size: 24px; line-height: 1.02; }}
+      .slug {{ margin: 0 0 12px; color: #5d655e; }}
+      img {{ width: 180px; height: 180px; display: block; margin: 8px 0 14px; }}
+      dl {{ margin: 0; display: grid; gap: 10px; }}
+      dt {{ font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }}
+      dd {{ margin: 4px 0 0; font-size: 12px; overflow-wrap: anywhere; }}
+    </style>
+  </head>
+  <body>
+    <main class="sheet">
+      {"".join(cards)}
+    </main>
+  </body>
+</html>
+"""
+
+
+def redirect_handler_js() -> str:
+    return """import fs from "node:fs/promises";
+
+const REDIRECT_MAP_PATH = new URL("./redirects/redirect-map.json", import.meta.url);
+
+export default async function handler(req, res) {
+  const map = JSON.parse(await fs.readFile(REDIRECT_MAP_PATH, "utf8"));
+  const code = req.query.c || req.url.split("/").filter(Boolean).at(-1);
+  if (!code || !map.codes[code]) {
+    res.statusCode = 404;
+    res.end("Unknown redirect code");
+    return;
+  }
+
+  res.statusCode = 302;
+  res.setHeader("Location", map.codes[code].target_url);
+  res.end();
+}
+"""
+
+
+def hubspot_proxy_js() -> str:
+    return """export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    res.statusCode = 405;
+    res.end("Method not allowed");
+    return;
+  }
+
+  const portalId = process.env.HUBSPOT_PORTAL_ID;
+  const formId = process.env.HUBSPOT_FORM_ID;
+  if (!portalId || !formId) {
+    res.statusCode = 500;
+    res.end("Missing HUBSPOT_PORTAL_ID or HUBSPOT_FORM_ID");
+    return;
+  }
+
+  const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+  const lead = body.lead || {};
+  const fields = [
+    { name: "firstname", value: lead.name || "" },
+    { name: "email", value: lead.email || "" },
+    { name: "company", value: lead.company || "" },
+    { name: "message", value: lead.notes || "" },
+    { name: "nfc_tag_slug", value: body.tag || "" },
+    { name: "nfc_campaign", value: body.campaign || "" }
+  ];
+
+  const response = await fetch(
+    `https://api.hsforms.com/submissions/v3/integration/submit/${portalId}/${formId}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fields,
+        context: {
+          pageUri: body.final_url || "",
+          pageName: body.campaign || "NFC Campaign"
+        }
+      })
+    }
+  );
+
+  const text = await response.text();
+  res.statusCode = response.status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(text);
+}
+"""
+
+
+def airtable_proxy_js() -> str:
+    return """export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    res.statusCode = 405;
+    res.end("Method not allowed");
+    return;
+  }
+
+  const token = process.env.AIRTABLE_PAT;
+  const baseId = process.env.AIRTABLE_BASE_ID;
+  const tableName = process.env.AIRTABLE_TABLE_NAME;
+  if (!token || !baseId || !tableName) {
+    res.statusCode = 500;
+    res.end("Missing AIRTABLE_PAT, AIRTABLE_BASE_ID, or AIRTABLE_TABLE_NAME");
+    return;
+  }
+
+  const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+  const lead = body.lead || {};
+  const payload = {
+    records: [
+      {
+        fields: {
+          Name: lead.name || "",
+          Email: lead.email || "",
+          Company: lead.company || "",
+          Notes: lead.notes || "",
+          Campaign: body.campaign || "",
+          Tag: body.tag || "",
+          FinalURL: body.final_url || "",
+          SubmittedAt: body.submitted_at || ""
+        }
+      }
+    ]
+  };
+
+  const response = await fetch(`https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const text = await response.text();
+  res.statusCode = response.status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(text);
+}
+"""
+
+
+def integrations_readme() -> str:
+    return """# Integration Templates
+
+This folder contains optional templates for wiring the generated microsite into common marketing tools.
+
+- `hubspot-proxy.js`: serverless example that forwards lead payloads into a HubSpot form using `HUBSPOT_PORTAL_ID` and `HUBSPOT_FORM_ID`.
+- `airtable-proxy.js`: serverless example that forwards lead payloads into Airtable using `AIRTABLE_PAT`, `AIRTABLE_BASE_ID`, and `AIRTABLE_TABLE_NAME`.
+- `redirect-handler.js`: serverless example that reads `redirects/redirect-map.json` and resolves short NFC redirect codes.
+
+For HubSpot, the generated site can also submit directly from the browser when `campaign.site.integration.provider` is `hubspot` and the required form IDs are present.
+"""
+
+
+def generate_integrations(bundle_dir: Path, redirect_enabled: bool) -> None:
+    integrations_dir = bundle_dir / "integrations"
+    integrations_dir.mkdir(parents=True, exist_ok=True)
+    write_text_file(integrations_dir / "README.md", integrations_readme())
+    write_text_file(integrations_dir / "hubspot-proxy.js", hubspot_proxy_js())
+    write_text_file(integrations_dir / "airtable-proxy.js", airtable_proxy_js())
+    if redirect_enabled:
+        write_text_file(integrations_dir / "redirect-handler.js", redirect_handler_js())
+
+
 def build_site_payload(config: dict[str, Any], manifest_tags: list[dict[str, Any]]) -> dict[str, Any]:
     site = config["campaign"].get("site", {})
     campaign_slug = config["campaign"].get("slug") or slugify(config["campaign"]["name"])
+    integration = site.get("integration", {})
+    lead_endpoint = site.get("lead_endpoint", "")
+    if integration.get("provider") == "airtable" and integration.get("endpoint"):
+        lead_endpoint = integration["endpoint"]
     return {
         "campaign": {
             "name": config["campaign"]["name"],
             "slug": campaign_slug,
-            "lead_endpoint": site.get("lead_endpoint", ""),
+            "lead_endpoint": lead_endpoint,
+            "integration": integration,
             "title": site.get("title", config["campaign"]["name"]),
             "headline": site.get("headline", "Tap to unlock the next move."),
             "subheadline": site.get(
@@ -941,7 +1313,44 @@ async function submitLead(event, data, tag) {
   setStatus("Submitting...");
 
   try {
-    if (data.campaign.lead_endpoint) {
+    if (data.campaign.integration && data.campaign.integration.provider === "hubspot") {
+      const portalId = data.campaign.integration.portal_id;
+      const formId = data.campaign.integration.form_id;
+      const fieldMap = data.campaign.integration.field_map || {
+        name: "firstname",
+        email: "email",
+        company: "company",
+        notes: "message"
+      };
+      if (!portalId || !formId) {
+        throw new Error("HubSpot integration requires portal_id and form_id.");
+      }
+      const fields = [
+        { name: fieldMap.name || "firstname", value: payload.lead.name || "" },
+        { name: fieldMap.email || "email", value: payload.lead.email || "" },
+        { name: fieldMap.company || "company", value: payload.lead.company || "" },
+        { name: fieldMap.notes || "message", value: payload.lead.notes || "" },
+        { name: "nfc_tag_slug", value: payload.tag || "" },
+        { name: "nfc_campaign", value: payload.campaign || "" }
+      ];
+      const response = await fetch(
+        `https://api.hsforms.com/submissions/v3/integration/submit/${portalId}/${formId}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fields,
+            context: {
+              pageUri: window.location.href,
+              pageName: data.campaign.title
+            }
+          })
+        }
+      );
+      if (!response.ok) {
+        throw new Error(`HubSpot returned ${response.status}`);
+      }
+    } else if (data.campaign.lead_endpoint) {
       const response = await fetch(data.campaign.lead_endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -994,18 +1403,27 @@ def build_campaign_bundle(
     out_dir: Path,
     flipper_root: Path | None = None,
 ) -> dict[str, Any]:
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config = load_campaign_config(config_path)
     campaign = config["campaign"]
     campaign_name = campaign["name"]
     campaign_slug = campaign.get("slug") or slugify(campaign_name)
     default_tag_type = campaign.get("default_tag_type", "NTAG213")
+    redirect_config = campaign.get("redirect", {})
+    redirect_enabled = bool(redirect_config.get("enabled"))
+    redirect_mode = redirect_config.get("mode", "path")
+    redirect_query_param = redirect_config.get("query_param", "c")
+    redirect_base_url = redirect_config.get("base_url", "").strip()
 
     bundle_dir = out_dir / campaign_slug
     site_dir = bundle_dir / "site"
+    qr_dir = bundle_dir / "qr"
+    print_dir = bundle_dir / "print"
+    redirects_dir = bundle_dir / "redirects"
     flipper_sd_dir = bundle_dir / "flipper_sd" / "ext" / "nfc" / campaign_slug
     flipper_sd_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_tags = []
+    redirect_codes: dict[str, dict[str, Any]] = {}
     for index, tag in enumerate(config["tags"], start=1):
         tag_name = tag["name"]
         tag_slug = tag.get("slug") or slugify(tag_name)
@@ -1026,11 +1444,13 @@ def build_campaign_bundle(
 
         kind = tag.get("kind", "lead_url")
         final_url = None
+        redirect_target_url = None
+        redirect_code = None
         if kind == "text":
             message = build_text_record(tag["text"], tag.get("lang", "en"))
         else:
             base_url = tag.get("base_url", campaign["base_url"])
-            final_url = build_marketing_url(
+            redirect_target_url = build_marketing_url(
                 base_url=base_url,
                 campaign=tag.get("campaign", campaign_slug),
                 source=source,
@@ -1039,6 +1459,28 @@ def build_campaign_bundle(
                 term=tag.get("term"),
                 extras=extras,
             )
+            final_url = redirect_target_url
+            if redirect_enabled:
+                if not redirect_base_url:
+                    raise ValueError("campaign.redirect.base_url is required when redirect.enabled is true")
+                redirect_code = tag.get("redirect_code") or deterministic_code(
+                    f"{campaign_slug}:{tag_slug}:{content}",
+                    length=int(redirect_config.get("code_length", 7)),
+                    alphabet=redirect_config.get(
+                        "alphabet", "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+                    ),
+                )
+                final_url = build_redirect_url(
+                    redirect_base_url,
+                    redirect_code,
+                    mode=redirect_mode,
+                    query_param=redirect_query_param,
+                )
+                redirect_codes[redirect_code] = {
+                    "tag": tag_slug,
+                    "target_url": redirect_target_url,
+                    "short_url": final_url,
+                }
             message = build_uri_record(final_url)
 
         profile = TAG_PROFILES[profile_name]
@@ -1054,6 +1496,8 @@ def build_campaign_bundle(
                 "tag_type": profile_name,
                 "content": content,
                 "final_url": final_url,
+                "redirect_target_url": redirect_target_url,
+                "redirect_code": redirect_code,
                 "relative_flipper_file": str(output_path.relative_to(bundle_dir)),
                 "interactive": interactive,
                 "site_copy": site_copy,
@@ -1061,17 +1505,40 @@ def build_campaign_bundle(
             }
         )
 
+    generate_qr_assets(qr_dir, manifest_tags, bundle_dir)
     site_payload = build_site_payload(config, manifest_tags)
     generate_site(site_dir, site_payload)
+    generate_integrations(bundle_dir, redirect_enabled)
+
+    if redirect_enabled:
+        redirects_dir.mkdir(parents=True, exist_ok=True)
+        write_json_file(
+            redirects_dir / "redirect-map.json",
+            {
+                "campaign": campaign_name,
+                "slug": campaign_slug,
+                "mode": redirect_mode,
+                "base_url": redirect_base_url,
+                "codes": redirect_codes,
+            },
+        )
+
+    print_dir.mkdir(parents=True, exist_ok=True)
+    write_text_file(print_dir / "deployment-sheet.html", print_sheet_html(campaign_name, manifest_tags))
 
     manifest = {
         "campaign": campaign_name,
         "slug": campaign_slug,
         "site": str(site_dir.relative_to(bundle_dir)),
+        "qr": str(qr_dir.relative_to(bundle_dir)),
+        "print": str(print_dir.relative_to(bundle_dir)),
+        "integrations": "integrations",
         "flipper_sd_path": str(flipper_sd_dir.relative_to(bundle_dir)),
+        "redirects": str(redirects_dir.relative_to(bundle_dir)) if redirect_enabled else None,
         "tags": manifest_tags,
     }
-    write_text_file(bundle_dir / "manifest.json", json.dumps(manifest, indent=2))
+    write_json_file(bundle_dir / "manifest.json", manifest)
+    write_csv_manifest(bundle_dir / "manifest.csv", manifest_tags)
 
     if flipper_root is not None:
         destination = flipper_root / "ext" / "nfc" / campaign_slug

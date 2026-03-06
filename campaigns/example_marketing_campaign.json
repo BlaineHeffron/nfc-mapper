@@ -6,56 +6,39 @@
     "default_tag_type": "NTAG215",
     "default_source": "nfc",
     "default_medium": "sticker",
+    "redirect": {
+      "enabled": true,
+      "base_url": "https://go.example.com/t",
+      "mode": "path",
+      "code_length": 7
+    },
     "site": {
       "title": "Street Demo Spring Launch",
       "headline": "Tap the sticker. Catch the moment.",
-      "subheadline": "Every round tag can open a slightly different interactive scene and still route into the same lead funnel.",
+      "subheadline": "Every round tag can open a different interactive scene while still feeding the same lead funnel.",
       "cta_label": "Send me the follow-up",
       "success_message": "Saved. We will send the follow-up from this activation soon.",
       "privacy_blurb": "This form stores the details you enter plus the campaign and tag metadata already present in the NFC URL.",
-      "lead_endpoint": ""
+      "lead_endpoint": "",
+      "integration": {
+        "provider": "hubspot",
+        "portal_id": "1234567",
+        "form_id": "00000000-0000-0000-0000-000000000000",
+        "field_map": {
+          "name": "firstname",
+          "email": "email",
+          "company": "company",
+          "notes": "message"
+        }
+      }
     }
   },
-  "tags": [
-    {
-      "name": "Booth A Surprise",
-      "slug": "booth-a-surprise",
-      "content": "booth_a",
-      "extras": {
-        "ref": "booth-a"
-      },
-      "interactive": {
-        "type": "reveal",
-        "headline": "Reveal the booth-only drop",
-        "prompt": "Tap reveal to surface a reward tied to this sticker.",
-        "outcomes": [
-          "Free sticker pack",
-          "VIP product demo slot",
-          "Hidden lookbook link"
-        ]
-      },
-      "site_copy": {
-        "headline": "This tag opens the booth-only lane.",
-        "subheadline": "Use the interaction, then leave an email if you want the follow-up package."
-      }
-    },
-    {
-      "name": "Window QR Alternative",
-      "slug": "window-quiz",
-      "content": "window_quiz",
-      "extras": {
-        "ref": "window"
-      },
-      "interactive": {
-        "type": "quiz",
-        "headline": "Pick the follow-up you want",
-        "prompt": "Choose the version of the campaign you want us to send.",
-        "options": [
-          "Quick product recap",
-          "Full campaign deck",
-          "Book a live walkthrough"
-        ]
-      }
+  "csv_import": {
+    "path": "example_tags.csv",
+    "defaults": {
+      "tag_type": "NTAG215",
+      "source": "nfc",
+      "medium": "sticker"
     }
-  ]
+  }
 }
