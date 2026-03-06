@@ -1,0 +1,61 @@
+{
+  "campaign": {
+    "name": "Street Demo Spring Launch",
+    "slug": "street-demo-spring-launch",
+    "base_url": "https://example.com/fzero-demo",
+    "default_tag_type": "NTAG215",
+    "default_source": "nfc",
+    "default_medium": "sticker",
+    "site": {
+      "title": "Street Demo Spring Launch",
+      "headline": "Tap the sticker. Catch the moment.",
+      "subheadline": "Every round tag can open a slightly different interactive scene and still route into the same lead funnel.",
+      "cta_label": "Send me the follow-up",
+      "success_message": "Saved. We will send the follow-up from this activation soon.",
+      "privacy_blurb": "This form stores the details you enter plus the campaign and tag metadata already present in the NFC URL.",
+      "lead_endpoint": ""
+    }
+  },
+  "tags": [
+    {
+      "name": "Booth A Surprise",
+      "slug": "booth-a-surprise",
+      "content": "booth_a",
+      "extras": {
+        "ref": "booth-a"
+      },
+      "interactive": {
+        "type": "reveal",
+        "headline": "Reveal the booth-only drop",
+        "prompt": "Tap reveal to surface a reward tied to this sticker.",
+        "outcomes": [
+          "Free sticker pack",
+          "VIP product demo slot",
+          "Hidden lookbook link"
+        ]
+      },
+      "site_copy": {
+        "headline": "This tag opens the booth-only lane.",
+        "subheadline": "Use the interaction, then leave an email if you want the follow-up package."
+      }
+    },
+    {
+      "name": "Window QR Alternative",
+      "slug": "window-quiz",
+      "content": "window_quiz",
+      "extras": {
+        "ref": "window"
+      },
+      "interactive": {
+        "type": "quiz",
+        "headline": "Pick the follow-up you want",
+        "prompt": "Choose the version of the campaign you want us to send.",
+        "options": [
+          "Quick product recap",
+          "Full campaign deck",
+          "Book a live walkthrough"
+        ]
+      }
+    }
+  ]
+}
